@@ -1,0 +1,208 @@
+import pandas as pd
+import numpy as np
+import pickle
+from supabase import create_client, Client
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings('ignore')
+
+class CropClassifier:
+    def __init__(self, supabase_url: str, supabase_key: str):
+        """Initialize the crop classifier with Supabase connection."""
+        self.supabase_url = supabase_url
+        self.supabase_key = supabase_key
+        self.supabase: Client = create_client(supabase_url, supabase_key)
+        
+        # Model components
+        self.model = None
+        self.scaler = StandardScaler()
+        self.label_encoder = LabelEncoder()
+        self.feature_columns = None
+        self.crop_classes = None
+        
+    def fetch_crop_data(self):
+        """Fetch crop and climate data from Supabase."""
+        try:
+            # Try different possible table names
+            table_names = ['crop_climate', 'crops', 'crop_data', 'agricultural_data', 'climate_crops']
+            
+            for table_name in table_names:
+                try:
+                    response = self.supabase.table(table_name).select('*').execute()
+                    if response.data:
+                        print(f"Data fetched from '{table_name}' table")
+                        return pd.DataFrame(response.data)
+                except Exception as e:
+                    continue
+                    
+        except Exception as e:
+            print(f"Error connecting to Supabase: {e}")
+        
+        # Generate synthetic data if no table exists
+        print("No crop data found. Generating synthetic data for demonstration...")
+        return self.generate_synthetic_data()
+    
+    def generate_synthetic_data(self):
+        """Generate realistic synthetic crop and climate data."""
+        np.random.seed(42)
+        
+        # Define crop profiles with their optimal conditions
+        crop_profiles = {
+            'wheat': {
+                'temp_range': (15, 25), 'temp_optimal': 20,
+                'humidity_range': (40, 70), 'humidity_optimal': 55,
+                'rainfall_range': (30, 80), 'rainfall_optimal': 55,
+                'ph_range': (6.0, 7.5), 'ph_optimal': 6.8,
+                'nitrogen_range': (40, 80), 'nitrogen_optimal': 60,
+                'phosphorus_range': (20, 50), 'phosphorus_optimal': 35,
+                'potassium_range': (30, 70), 'potassium_optimal': 50,
+                'elevation_range': (0, 1500), 'elevation_optimal': 500
+            },
+            'rice': {
+                'temp_range': (20, 35), 'temp_optimal': 28,
+                'humidity_range': (70, 95), 'humidity_optimal': 85,
+                'rainfall_range': (100, 250), 'rainfall_optimal': 180,
+                'ph_range': (5.5, 7.0), 'ph_optimal': 6.2,
+                'nitrogen_range': (60, 120), 'nitrogen_optimal': 90,
+                'phosphorus_range': (25, 60), 'phosphorus_optimal': 42,
+                'potassium_range': (40, 80), 'potassium_optimal': 60,
+                'elevation_range': (0, 800), 'elevation_optimal': 200
+            },
+            'corn': {
+                'temp_range': (18, 32), 'temp_optimal': 25,
+                'humidity_range': (50, 80), 'humidity_optimal': 65,
+                'rainfall_range': (50, 120), 'rainfall_optimal': 85,
+                'ph_range': (5.8, 7.5), 'ph_optimal': 6.8,
+                'nitrogen_range': (80, 150), 'nitrogen_optimal': 115,
+                'phosphorus_range': (30, 70), 'phosphorus_optimal': 50,
+                'potassium_range': (60, 120), 'potassium_optimal': 90,
+                'elevation_range': (0, 2000), 'elevation_optimal': 800
+            },
+            'tomato': {
+                'temp_range': (18, 28), 'temp_optimal': 23,
+                'humidity_range': (60, 85), 'humidity_optimal': 72,
+                'rainfall_range': (60, 100), 'rainfall_optimal': 80,
+                'ph_range': (6.0, 7.5), 'ph_optimal': 6.5,
+                'nitrogen_range': (50, 100), 'nitrogen_optimal': 75,
+                'phosphorus_range': (40, 80), 'phosphorus_optimal': 60,
+                'potassium_range': (80, 150), 'potassium_optimal': 115,
+                'elevation_range': (0, 1200), 'elevation_optimal': 400
+            },
+            'potato': {
+                'temp_range': (12, 22), 'temp_optimal': 17,
+                'humidity_range': (55, 75), 'humidity_optimal': 65,
+                'rainfall_range': (40, 90), 'rainfall_optimal': 65,
+                'ph_range': (5.0, 6.5), 'ph_optimal': 5.8,
+                'nitrogen_range': (60, 100), 'nitrogen_optimal': 80,
+                'phosphorus_range': (35, 65), 'phosphorus_optimal': 50,
+                'potassium_range': (80, 140), 'potassium_optimal': 110,
+                'elevation_range': (0, 2500), 'elevation_optimal': 1000
+            },
+            'soybean': {
+                'temp_range': (20, 30), 'temp_optimal': 25,
+                'humidity_range': (50, 75), 'humidity_optimal': 62,
+                'rainfall_range': (60, 120), 'rainfall_optimal': 90,
+                'ph_range': (6.0, 7.5), 'ph_optimal': 6.8,
+                'nitrogen_range': (20, 60), 'nitrogen_optimal': 40,  # N-fixing crop
+                'phosphorus_range': (30, 70), 'phosphorus_optimal': 50,
+                'potassium_range': (50, 100), 'potassium_optimal': 75,
+                'elevation_range': (0, 1000), 'elevation_optimal': 300
+            },
+            'cotton': {
+                'temp_range': (22, 35), 'temp_optimal': 28,
+                'humidity_range': (40, 70), 'humidity_optimal': 55,
+                'rainfall_range': (50, 100), 'rainfall_optimal': 75,
+                'ph_range': (5.8, 8.0), 'ph_optimal': 7.0,
+                'nitrogen_range': (80, 140), 'nitrogen_optimal': 110,
+                'phosphorus_range': (40, 80), 'phosphorus_optimal': 60,
+                'potassium_range': (60, 120), 'potassium_optimal': 90,
+                'elevation_range': (0, 1500), 'elevation_optimal': 500
+            },
+            'barley': {
+                'temp_range': (10, 20), 'temp_optimal': 15,
+                'humidity_range': (45, 65), 'humidity_optimal': 55,
+                'rainfall_range': (25, 70), 'rainfall_optimal': 47,
+                'ph_range': (6.0, 7.5), 'ph_optimal': 6.8,
+                'nitrogen_range': (40, 80), 'nitrogen_optimal': 60,
+                'phosphorus_range': (25, 55), 'phosphorus_optimal': 40,
+                'potassium_range': (35, 75), 'potassium_optimal': 55,
+                'elevation_range': (0, 2000), 'elevation_optimal': 800
+            }
+        }
+        
+        data = []
+        n_samples_per_crop = 300  # Total samples will be 8 * 300 = 2400
+        
+        for crop_name, profile in crop_profiles.items():
+            for _ in range(n_samples_per_crop):
+                # Generate samples with higher probability around optimal conditions
+                sample = {}
+                
+                # 70% of samples close to optimal, 30% across the full range
+                if np.random.random() < 0.7:
+                    # Close to optimal conditions
+                    sample['temperature'] = np.random.normal(profile['temp_optimal'], 2)
+                    sample['humidity'] = np.random.normal(profile['humidity_optimal'], 5)
+                    sample['rainfall'] = np.random.normal(profile['rainfall_optimal'], 10)
+                    sample['soil_ph'] = np.random.normal(profile['ph_optimal'], 0.3)
+                    sample['soil_nitrogen'] = np.random.normal(profile['nitrogen_optimal'], 8)
+                    sample['soil_phosphorus'] = np.random.normal(profile['phosphorus_optimal'], 5)
+                    sample['soil_potassium'] = np.random.normal(profile['potassium_optimal'], 10)
+                    sample['elevation'] = np.random.normal(profile['elevation_optimal'], 200)
+                else:
+                    # Across full range (including suboptimal conditions)
+                    sample['temperature'] = np.random.uniform(*profile['temp_range'])
+                    sample['humidity'] = np.random.uniform(*profile['humidity_range'])
+                    sample['rainfall'] = np.random.uniform(*profile['rainfall_range'])
+                    sample['soil_ph'] = np.random.uniform(*profile['ph_range'])
+                    sample['soil_nitrogen'] = np.random.uniform(*profile['nitrogen_range'])
+                    sample['soil_phosphorus'] = np.random.uniform(*profile['phosphorus_range'])
+                    sample['soil_potassium'] = np.random.uniform(*profile['potassium_range'])
+                    sample['elevation'] = np.random.uniform(*profile['elevation_range'])
+                
+                # Ensure realistic bounds
+                sample['temperature'] = np.clip(sample['temperature'], -10, 50)
+                sample['humidity'] = np.clip(sample['humidity'], 10, 100)
+                sample['rainfall'] = np.clip(sample['rainfall'], 0, 400)
+                sample['soil_ph'] = np.clip(sample['soil_ph'], 4.0, 9.0)
+                sample['soil_nitrogen'] = np.clip(sample['soil_nitrogen'], 10, 200)
+                sample['soil_phosphorus'] = np.clip(sample['soil_phosphorus'], 5, 100)
+                sample['soil_potassium'] = np.clip(sample['soil_potassium'], 10, 200)
+                sample['elevation'] = np.clip(sample['elevation'], 0, 4000)
+                
+                sample['best_crop'] = crop_name
+                data.append(sample)
+        
+        # Add some noise and edge cases
+        for _ in range(200):  # Add 200 challenging samples
+            random_crop = np.random.choice(list(crop_profiles.keys()))
+            sample = {
+                'temperature': np.random.uniform(-5, 45),
+                'humidity': np.random.uniform(15, 95),
+                'rainfall': np.random.uniform(5, 300),
+                'soil_ph': np.random.uniform(4.5, 8.5),
+                'soil_nitrogen': np.random.uniform(15, 180),
+                'soil_phosphorus': np.random.uniform(10, 90),
+                'soil_potassium': np.random.uniform(15, 180),
+                'elevation': np.random.uniform(0, 3500),
+                'best_crop': random_crop
+            }
+            data.append(sample)
+        
+        return pd.DataFrame(data)
+    
+    def preprocess_data(self, df):
+        """Preprocess the crop classification data."""
+        # Handle any missing values
+        numeric_columns = ['temperature', 'humidity', 'rainfall', 'soil_ph', 
+                          'soil_nitrogen', 'soil_phosphorus', 'soil_potassium', 'elevation']
+        
+        for col in numeric_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                df[col] = df[col].fillna(df[col].

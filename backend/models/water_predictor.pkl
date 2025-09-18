@@ -1,0 +1,391 @@
+import pandas as pd
+import numpy as np
+import pickle
+from supabase import create_client, Client
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score
+import warnings
+warnings.filterwarnings('ignore')
+
+class WaterFlowPredictor:
+    def __init__(self, supabase_url: str, supabase_key: str):
+        """Initialize the water flow predictor with Supabase connection."""
+        self.supabase_url = supabase_url
+        self.supabase_key = supabase_key
+        self.supabase: Client = create_client(supabase_url, supabase_key)
+        
+        # Model and scaler
+        self.model = None
+        self.scaler = StandardScaler()
+        self.feature_columns = None
+        
+    def fetch_water_data(self):
+        """Fetch water flow data from Supabase."""
+        try:
+            # Try different possible table names
+            table_names = ['water_flow', 'irrigation_data', 'water_usage', 'field_irrigation']
+            
+            for table_name in table_names:
+                try:
+                    response = self.supabase.table(table_name).select('*').execute()
+                    if response.data:
+                        print(f"Data fetched from '{table_name}' table")
+                        return pd.DataFrame(response.data)
+                except Exception as e:
+                    continue
+                    
+        except Exception as e:
+            print(f"Error connecting to Supabase: {e}")
+        
+        # Generate synthetic data if no table exists
+        print("No water flow data found. Generating synthetic data for demonstration...")
+        return self.generate_synthetic_data()
+    
+    def generate_synthetic_data(self):
+        """Generate realistic synthetic water flow data."""
+        np.random.seed(42)
+        n_samples = 2000
+        
+        # Generate base features
+        data = {
+            'temperature': np.random.normal(25, 8, n_samples),  # Celsius (10-40°C range)
+            'humidity': np.random.normal(60, 20, n_samples),    # Percentage (20-100%)
+            'rainfall': np.random.exponential(5, n_samples),    # mm per day
+            'soil_moisture': np.random.normal(40, 15, n_samples), # Percentage
+            'field_size': np.random.normal(10, 5, n_samples),   # Hectares
+            'time_of_day': np.random.randint(6, 20, n_samples), # Hour (6 AM to 8 PM)
+            'wind_speed': np.random.normal(8, 3, n_samples),    # km/h
+            'solar_radiation': np.random.normal(20, 8, n_samples), # MJ/m²/day
+        }
+        
+        # Add categorical variables
+        crop_types = ['wheat', 'rice', 'corn', 'tomato', 'potato', 'soybean']
+        seasons = ['spring', 'summer', 'autumn', 'winter']
+        soil_types = ['clay', 'sandy', 'loam', 'silty']
+        
+        data['crop_type'] = np.random.choice(crop_types, n_samples)
+        data['season'] = np.random.choice(seasons, n_samples)
+        data['soil_type'] = np.random.choice(soil_types, n_samples)
+        
+        df = pd.DataFrame(data)
+        
+        # Ensure realistic ranges
+        df['temperature'] = np.clip(df['temperature'], 5, 45)
+        df['humidity'] = np.clip(df['humidity'], 10, 95)
+        df['rainfall'] = np.clip(df['rainfall'], 0, 50)
+        df['soil_moisture'] = np.clip(df['soil_moisture'], 10, 80)
+        df['field_size'] = np.clip(df['field_size'], 1, 50)
+        df['wind_speed'] = np.clip(df['wind_speed'], 0, 25)
+        df['solar_radiation'] = np.clip(df['solar_radiation'], 5, 35)
+        
+        # Generate realistic water flow based on agricultural factors
+        water_flow = (
+            # Base water requirement
+            2.0 * df['field_size'] +
+            
+            # Temperature effect (higher temp = more water needed)
+            0.3 * (df['temperature'] - 20).clip(0, None) +
+            
+            # Humidity effect (lower humidity = more water needed)
+            0.2 * (70 - df['humidity']).clip(0, None) +
+            
+            # Rainfall effect (more rain = less irrigation needed)
+            -0.4 * df['rainfall'] +
+            
+            # Soil moisture effect (lower moisture = more water needed)
+            0.1 * (50 - df['soil_moisture']).clip(0, None) +
+            
+            # Solar radiation effect (more sun = more water needed)
+            0.15 * (df['solar_radiation'] - 15).clip(0, None) +
+            
+            # Wind effect (more wind = more evaporation)
+            0.1 * df['wind_speed'] +
+            
+            # Time of day effect (midday needs more water)
+            0.2 * np.abs(df['time_of_day'] - 13) * -1 + 2 +
+            
+            # Crop type effects
+            df['crop_type'].map({
+                'rice': 3.0,      # High water requirement
+                'corn': 1.5,      # Medium-high
+                'tomato': 2.0,    # High
+                'wheat': 1.0,     # Medium
+                'potato': 1.2,    # Medium
+                'soybean': 0.8    # Lower
+            }) +
+            
+            # Season effects
+            df['season'].map({
+                'summer': 1.5,    # Peak watering season
+                'spring': 1.0,    # Growing season
+                'autumn': 0.5,    # Less water needed
+                'winter': 0.2     # Minimal watering
+            }) +
+            
+            # Soil type effects
+            df['soil_type'].map({
+                'sandy': 1.2,     # Drains quickly, needs more water
+                'clay': 0.8,      # Retains water, needs less
+                'loam': 1.0,      # Balanced
+                'silty': 0.9      # Good retention
+            }) +
+            
+            # Random variation
+            np.random.normal(0, 1.5, n_samples)
+        )
+        
+        # Ensure non-negative water flow
+        df['water_flow'] = np.maximum(water_flow, 0.1)
+        
+        return df
+    
+    def preprocess_data(self, df):
+        """Preprocess the water flow data."""
+        # Handle categorical variables with one-hot encoding
+        categorical_columns = ['crop_type', 'season', 'soil_type']
+        
+        for col in categorical_columns:
+            if col in df.columns:
+                dummies = pd.get_dummies(df[col], prefix=col, drop_first=True)
+                df = pd.concat([df, dummies], axis=1)
+                df = df.drop(col, axis=1)
+        
+        # Fill any missing values
+        df = df.fillna(df.median())
+        
+        # Separate features and target
+        if 'water_flow' in df.columns:
+            X = df.drop('water_flow', axis=1)
+            y = df['water_flow']
+            return X, y
+        else:
+            return df, None
+    
+    def train_model(self):
+        """Train the water flow prediction model."""
+        print("=== Training Water Flow Predictor ===")
+        
+        # Fetch and preprocess data
+        water_df = self.fetch_water_data()
+        print(f"Dataset shape: {water_df.shape}")
+        
+        X, y = self.preprocess_data(water_df)
+        
+        if y is None:
+            raise ValueError("No target variable 'water_flow' found in the data!")
+        
+        # Store feature columns for later use
+        self.feature_columns = X.columns.tolist()
+        print(f"Features: {self.feature_columns}")
+        
+        # Split the data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, shuffle=True
+        )
+        
+        print(f"Training set size: {X_train.shape[0]}")
+        print(f"Test set size: {X_test.shape[0]}")
+        
+        # Scale features
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        X_test_scaled = self.scaler.transform(X_test)
+        
+        # Train model with optimized parameters
+        self.model = RandomForestRegressor(
+            n_estimators=200,
+            max_depth=15,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            random_state=42,
+            n_jobs=-1
+        )
+        
+        print("Training model...")
+        self.model.fit(X_train_scaled, y_train)
+        
+        # Evaluate model
+        y_pred_train = self.model.predict(X_train_scaled)
+        y_pred_test = self.model.predict(X_test_scaled)
+        
+        # Calculate metrics
+        train_mse = mean_squared_error(y_train, y_pred_train)
+        test_mse = mean_squared_error(y_test, y_pred_test)
+        train_r2 = r2_score(y_train, y_pred_train)
+        test_r2 = r2_score(y_test, y_pred_test)
+        
+        print(f"\n=== Model Performance ===")
+        print(f"Training RMSE: {np.sqrt(train_mse):.3f}")
+        print(f"Test RMSE: {np.sqrt(test_mse):.3f}")
+        print(f"Training R²: {train_r2:.3f}")
+        print(f"Test R²: {test_r2:.3f}")
+        
+        # Feature importance
+        feature_importance = pd.DataFrame({
+            'feature': self.feature_columns,
+            'importance': self.model.feature_importances_
+        }).sort_values('importance', ascending=False)
+        
+        print(f"\n=== Top 10 Feature Importances ===")
+        for idx, row in feature_importance.head(10).iterrows():
+            print(f"{row['feature']}: {row['importance']:.4f}")
+    
+    def save_model(self, filename='water_predictor.pkl'):
+        """Save the trained model to a pickle file."""
+        if self.model is None:
+            raise ValueError("Model not trained yet! Call train_model() first.")
+        
+        model_data = {
+            'model': self.model,
+            'scaler': self.scaler,
+            'feature_columns': self.feature_columns,
+            'model_type': 'water_flow_predictor',
+            'version': '1.0'
+        }
+        
+        with open(filename, 'wb') as f:
+            pickle.dump(model_data, f)
+        
+        print(f"\nModel saved as '{filename}'")
+        print(f"Model file size: {round(len(pickle.dumps(model_data)) / 1024, 2)} KB")
+    
+    def load_model(self, filename='water_predictor.pkl'):
+        """Load a trained model from a pickle file."""
+        try:
+            with open(filename, 'rb') as f:
+                model_data = pickle.load(f)
+            
+            self.model = model_data['model']
+            self.scaler = model_data['scaler']
+            self.feature_columns = model_data['feature_columns']
+            
+            print(f"Model loaded from '{filename}'")
+            return True
+        except FileNotFoundError:
+            print(f"Model file '{filename}' not found!")
+            return False
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return False
+    
+    def predict(self, features):
+        """Predict water flow for given features."""
+        if self.model is None:
+            raise ValueError("Model not trained or loaded!")
+        
+        # Convert to DataFrame if it's a dictionary
+        if isinstance(features, dict):
+            features_df = pd.DataFrame([features])
+        else:
+            features_df = features.copy()
+        
+        # Preprocess features (same as training)
+        processed_features, _ = self.preprocess_data(features_df)
+        
+        # Ensure all required columns are present
+        for col in self.feature_columns:
+            if col not in processed_features.columns:
+                processed_features[col] = 0  # Default value for missing features
+        
+        # Reorder columns to match training
+        processed_features = processed_features[self.feature_columns]
+        
+        # Scale features
+        features_scaled = self.scaler.transform(processed_features)
+        
+        # Make prediction
+        prediction = self.model.predict(features_scaled)
+        
+        return prediction[0] if len(prediction) == 1 else prediction
+    
+    def get_prediction_with_confidence(self, features):
+        """Get prediction with confidence interval."""
+        if self.model is None:
+            raise ValueError("Model not trained or loaded!")
+        
+        # Get individual tree predictions for confidence estimation
+        processed_features, _ = self.preprocess_data(pd.DataFrame([features]) if isinstance(features, dict) else features)
+        
+        # Ensure all required columns are present
+        for col in self.feature_columns:
+            if col not in processed_features.columns:
+                processed_features[col] = 0
+        
+        processed_features = processed_features[self.feature_columns]
+        features_scaled = self.scaler.transform(processed_features)
+        
+        # Get predictions from all trees
+        tree_predictions = np.array([tree.predict(features_scaled) for tree in self.model.estimators_])
+        
+        prediction = np.mean(tree_predictions, axis=0)[0]
+        std_dev = np.std(tree_predictions, axis=0)[0]
+        
+        return {
+            'prediction': prediction,
+            'confidence_interval': {
+                'lower': prediction - 1.96 * std_dev,
+                'upper': prediction + 1.96 * std_dev
+            },
+            'std_deviation': std_dev
+        }
+
+def main():
+    # Supabase credentials
+    url = "https://gqwravnbmbfhrsskljhn.supabase.co"
+    key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdxd3Jhdm5ibWJmaHJzc2tsamhuIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NzA5MjEzMiwiZXhwIjoyMDcyNjY4MTMyfQ.5Mk44RxdPSgoZ05oAt1KGKUPxJBK3X99Hsb7lsfY6S4"
+    
+    # Initialize and train the model
+    water_predictor = WaterFlowPredictor(url, key)
+    water_predictor.train_model()
+    water_predictor.save_model()
+    
+    # Test predictions
+    print("\n=== Testing Predictions ===")
+    
+    # Example 1: High water demand scenario
+    test_features_1 = {
+        'temperature': 35,      # Hot day
+        'humidity': 30,         # Low humidity
+        'rainfall': 0,          # No rain
+        'soil_moisture': 20,    # Dry soil
+        'field_size': 15,       # Large field
+        'time_of_day': 14,      # Midday
+        'wind_speed': 12,       # Windy
+        'solar_radiation': 28,  # High solar radiation
+        'crop_type': 'tomato',  # High water need crop
+        'season': 'summer',     # Peak season
+        'soil_type': 'sandy'    # Fast-draining soil
+    }
+    
+    prediction_1 = water_predictor.predict(test_features_1)
+    detailed_1 = water_predictor.get_prediction_with_confidence(test_features_1)
+    
+    print(f"\nHigh demand scenario:")
+    print(f"Predicted water flow: {prediction_1:.2f} L/hour")
+    print(f"Confidence interval: {detailed_1['confidence_interval']['lower']:.2f} - {detailed_1['confidence_interval']['upper']:.2f}")
+    
+    # Example 2: Low water demand scenario
+    test_features_2 = {
+        'temperature': 18,      # Cool day
+        'humidity': 80,         # High humidity
+        'rainfall': 15,         # Recent rain
+        'soil_moisture': 70,    # Moist soil
+        'field_size': 5,        # Small field
+        'time_of_day': 8,       # Morning
+        'wind_speed': 3,        # Light wind
+        'solar_radiation': 12,  # Low solar radiation
+        'crop_type': 'wheat',   # Lower water need
+        'season': 'spring',     # Moderate season
+        'soil_type': 'clay'     # Water-retaining soil
+    }
+    
+    prediction_2 = water_predictor.predict(test_features_2)
+    detailed_2 = water_predictor.get_prediction_with_confidence(test_features_2)
+    
+    print(f"\nLow demand scenario:")
+    print(f"Predicted water flow: {prediction_2:.2f} L/hour")
+    print(f"Confidence interval: {detailed_2['confidence_interval']['lower']:.2f} - {detailed_2['confidence_interval']['upper']:.2f}")
+
+if __name__ == "__main__":
+    main()

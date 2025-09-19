@@ -67,7 +67,10 @@ const translations = {
     high: "High",
     low: "Low",
     liveFeed: "Live Camera Feed",
-    cameraOffline: "Camera offline"
+    cameraOffline: "Camera offline",
+    cameraOnline: "Camera online",
+    connecting: "Connecting to camera...",
+    noCamera: "No camera detected"
   },
   hi: {
     dashboard: "हार्वी डैशबोर्ड",
@@ -116,7 +119,10 @@ const translations = {
     high: "उच्च",
     low: "कम",
     liveFeed: "लाइव कैमरा फीड",
-    cameraOffline: "कैमरा ऑफलाइन"
+    cameraOffline: "कैमरा ऑफलाइन",
+    cameraOnline: "कैमरा ऑनलाइन",
+    connecting: "कैमरा से जुड़ रहा है...",
+    noCamera: "कोई कैमरा नहीं मिला"
   },
   ta: {
     dashboard: "ஹார்வி டாஷ்போர்ட்",
@@ -165,7 +171,10 @@ const translations = {
     high: "அதிக",
     low: "குறைந்த",
     liveFeed: "நேரடி கேமரா ஃபீட்",
-    cameraOffline: "கேமரா ஆஃப்லைன்"
+    cameraOffline: "கேமரா ஆஃப்லைன்",
+    cameraOnline: "கேமரா ஆன்லைன்",
+    connecting: "கேமராவுடன் இணைக்கிறது...",
+    noCamera: "கேமரா கண்டறியப்படவில்லை"
   },
   or: {
     dashboard: "ହାର୍ଭି ଡ୍ୟାସବୋର୍ଡ",
@@ -214,7 +223,10 @@ const translations = {
     high: "ଉଚ୍ଚ",
     low: "କମ",
     liveFeed: "ଲାଇଭ କ୍ୟାମେରା ଫିଡ୍",
-    cameraOffline: "କ୍ୟାମେରା ଅଫ୍ଲାଇନ୍"
+    cameraOffline: "କ୍ୟାମେରା ଅଫ୍ଲାଇନ୍",
+    cameraOnline: "କ୍ୟାମେରା ଅନଲାଇନ୍",
+    connecting: "କ୍ୟାମେରା ସହିତ ସଂଯୋଗ...",
+    noCamera: "କ୍ୟାମେରା ଚିହ୍ନିତ ହୋଇନାହିଁ"
   },
   ne: {
     dashboard: "हार्वी ड्यासबोर्ड",
@@ -263,7 +275,10 @@ const translations = {
     high: "उच्च",
     low: "कम",
     liveFeed: "लाइभ क्यामेरा फिड",
-    cameraOffline: "कैमरा अफलाइन"
+    cameraOffline: "कैमरा अफलाइन",
+    cameraOnline: "कैमरा अनलाइन",
+    connecting: "कैमरासँग जडान गर्दै...",
+    noCamera: "कुनै कैमरा फेला परेन"
   }
 };
 
@@ -275,7 +290,6 @@ const CONFIG = {
   CHART_DATA_POINTS: 8,
   MAX_ALERTS: 10,
   DATA_LIMIT: 1000,
-  CAMERA_URL: "http://10.234.83.109/",
 };
 
 // Memoized fetch options
@@ -291,19 +305,62 @@ const fetchOptions = {
 const normalizeData = (rawData) => {
   return rawData.map((r) => ({
     id: r.id,
-    temp: parseFloat(r.Temperature ?? r.temperature ?? r.Temp ?? r.temp) || 0,
-    hum: parseFloat(r.Humidity ?? r.humidity ?? r.Humi ?? r.h) || 0,
-    soil: parseFloat(r.Soil_moisture ?? r.soilMoisture ?? r.soil_moisture) || 0,
-    light: parseFloat(r.Light ?? r.light) || 0,
-    gasPercent: parseFloat(r.gasPercent ?? r.gas_percent ?? r.gas) || 0,
-    gasRaw: parseFloat(r.gasRaw ?? r.gas_raw) || 0,
+    temp: parseFloat(r.Temperature ?? r.temperature ?? r.temp ?? r.ax) || 0,
+    hum: parseFloat(r.Humidity ?? r.humidity ?? r.hum ?? r.ay) || 0,
+    soil: parseFloat(r.Soil_moisture ?? r.soilMoisture ?? r.soil_moisture ?? r.az) || 0,
+    light: parseFloat(r.Light ?? r.light ?? r.gx) || 0,
+    gasPercent: parseFloat(r.gasPercent ?? r.gas_percent ?? r.gas ?? r.gy) || 0,
+    gasRaw: parseFloat(r.gasRaw ?? r.gas_raw ?? r.gz) || 0,
     weather: r.Weather ?? r.weather ?? "Unknown",
     pollution: r.Pollution ?? r.pollution ?? "Unknown",
     soilCondition: r.SoilCondition ?? r.soilCondition ?? r.soil_condition,
-    alert: r.Alert ?? r.alert ?? "None",
+    alert: r.Alert ?? r.alert ?? (r.landslide && r.landslide === 1 ? "Landslide Detected!" : "None"),
     airQuality: r.airQuality ?? r.air_quality ?? r.airQuality,
     time: r.inserted_at ?? r.created_at ?? r.ts ?? new Date().toISOString(),
+    cameraIP: r.camera_ip ?? null,
+    cameraActive: r.camera_active ?? false,
+    waterLevel: r.water_level ?? 0,
+    landslide: r.landslide ?? 0,
+    // Use accelerometer data if available
+    ax: parseFloat(r.ax) || 0,
+    ay: parseFloat(r.ay) || 0,
+    az: parseFloat(r.az) || 0,
+    gx: parseInt(r.gx) || 0,
+    gy: parseInt(r.gy) || 0,
+    gz: parseInt(r.gz) || 0,
   })).reverse();
+};
+
+// Custom hook for camera data fetching
+const useCameraData = () => {
+  const [cameraInfo, setCameraInfo] = useState({ ip: null, isActive: false, lastSeen: null });
+  
+  const fetchCameraStatus = useCallback(async () => {
+    try {
+      // Get latest sensor data entry to check for camera IP
+      const response = await fetch(`${CONFIG.SUPABASE_URL}?select=camera_ip,camera_active&order=id.desc&limit=1`, fetchOptions);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.length > 0 && data[0].camera_ip) {
+          setCameraInfo({
+            ip: data[0].camera_ip,
+            isActive: data[0].camera_active || false,
+            lastSeen: new Date().toISOString()
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Failed to fetch camera status:", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchCameraStatus();
+    const interval = setInterval(fetchCameraStatus, 10000); // Check every 10 seconds
+    return () => clearInterval(interval);
+  }, [fetchCameraStatus]);
+
+  return { cameraInfo, refreshCameraStatus: fetchCameraStatus };
 };
 
 // Crop recommendation engine - O(1) time complexity
@@ -323,7 +380,6 @@ const generateCropRecommendations = (sensorData) => {
       waterNeed: "High",
       growthPeriod: "120-150 days",
       marketDemand: "High",
-      // profitability: "₹45,000/acre"
     },
     {
       crop: "Wheat",
@@ -333,7 +389,6 @@ const generateCropRecommendations = (sensorData) => {
       waterNeed: "Moderate",
       growthPeriod: "110-130 days",
       marketDemand: "Very High",
-      // profitability: "₹35,000/acre"
     },
     {
       crop: "Corn",
@@ -343,7 +398,6 @@ const generateCropRecommendations = (sensorData) => {
       waterNeed: "Moderate",
       growthPeriod: "90-110 days",
       marketDemand: "High",
-      // profitability: "₹40,000/acre"
     },
     {
       crop: "Tomatoes",
@@ -353,7 +407,6 @@ const generateCropRecommendations = (sensorData) => {
       waterNeed: "High",
       growthPeriod: "70-90 days",
       marketDemand: "Very High",
-      // profitability: "₹60,000/acre"
     }
   ];
 
@@ -409,6 +462,131 @@ const analyzeWaterFlow = (sensorData) => {
     ]
   };
 };
+
+// Live Feed Card Component with dynamic IP fetching
+const LiveFeedCard = React.memo(({ t }) => {
+  const { cameraInfo } = useCameraData();
+  const [connectionStatus, setConnectionStatus] = useState('connecting');
+  const [retryCount, setRetryCount] = useState(0);
+  const iframeRef = useRef(null);
+
+  const cameraUrl = cameraInfo.ip ? `http://10.234.83.109/` : null;
+
+  useEffect(() => {
+    if (!cameraUrl) {
+      setConnectionStatus('no-camera');
+      return;
+    }
+
+    setConnectionStatus('connecting');
+    
+    // Test camera connectivity
+    const testConnection = async () => {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        
+        const response = await fetch(cameraUrl, { 
+          method: 'HEAD', 
+          mode: 'no-cors',
+          signal: controller.signal 
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (cameraInfo.isActive) {
+          setConnectionStatus('online');
+          setRetryCount(0);
+        } else {
+          setConnectionStatus('offline');
+        }
+      } catch (error) {
+        setConnectionStatus('offline');
+        if (retryCount < 3) {
+          setTimeout(() => setRetryCount(prev => prev + 1), 2000);
+        }
+      }
+    };
+
+    testConnection();
+  }, [cameraUrl, cameraInfo.isActive, retryCount]);
+
+  const getStatusDisplay = () => {
+    switch (connectionStatus) {
+      case 'connecting':
+        return { text: t.connecting, color: 'text-yellow-600', bgColor: 'bg-yellow-50' };
+      case 'online':
+        return { text: t.cameraOnline, color: 'text-green-600', bgColor: 'bg-green-50' };
+      case 'offline':
+        return { text: t.cameraOffline, color: 'text-red-600', bgColor: 'bg-red-50' };
+      case 'no-camera':
+        return { text: t.noCamera, color: 'text-gray-600', bgColor: 'bg-gray-50' };
+      default:
+        return { text: t.connecting, color: 'text-yellow-600', bgColor: 'bg-yellow-50' };
+    }
+  };
+
+  const status = getStatusDisplay();
+
+  return (
+    <div className="bg-white rounded-2xl p-4 shadow-md h-full">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="font-semibold flex items-center gap-2">
+          <Camera size={20} className="text-gray-600" />
+          {t.liveFeed}
+        </h2>
+        <div className={`text-xs px-2 py-1 rounded-full ${status.bgColor}`}>
+          <span className={status.color}>{status.text}</span>
+        </div>
+      </div>
+      
+      <div className="relative w-full h-full min-h-[500px]">
+        {cameraUrl && (connectionStatus === 'online' || connectionStatus === 'connecting') ? (
+          <iframe
+            ref={iframeRef}
+            src={cameraUrl}
+            className="w-full h-full rounded-lg border border-gray-200"
+            title="Live Camera Feed"
+            onLoad={() => {
+              if (cameraInfo.isActive) {
+                setConnectionStatus('online');
+              }
+            }}
+            onError={() => setConnectionStatus('offline')}
+          />
+        ) : (
+          <div className={`absolute inset-0 flex flex-col items-center justify-center ${status.bgColor} rounded-lg`}>
+            <Camera size={48} className={`mb-4 ${status.color}`} />
+            <p className={`text-sm text-center px-4 ${status.color}`}>
+              {connectionStatus === 'no-camera' 
+                ? `${t.noCamera}. ${t.connecting}` 
+                : status.text
+              }
+            </p>
+            {cameraUrl && connectionStatus === 'offline' && (
+              <button
+                onClick={() => setRetryCount(prev => prev + 1)}
+                className="mt-3 px-4 py-2 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 transition-colors"
+              >
+                {t.refresh}
+              </button>
+            )}
+            {cameraInfo.ip && (
+              <p className="text-xs text-gray-500 mt-2">Camera IP: {cameraInfo.ip}</p>
+            )}
+          </div>
+        )}
+      </div>
+      
+      {connectionStatus === 'online' && cameraInfo.ip && (
+        <div className="mt-2 flex justify-between items-center text-xs text-gray-500">
+          <span>IP: {cameraInfo.ip}</span>
+          <span>Status: Live</span>
+        </div>
+      )}
+    </div>
+  );
+});
 
 // Enhanced AI Prediction Page Component
 const AIPredictionPage = React.memo(({ onBack, sensorData, language = "en" }) => {
@@ -625,10 +803,6 @@ const SeasonalCropCard = React.memo(({ item, t }) => (
           item.waterReq === 'Moderate' ? 'text-yellow-600' : 'text-green-600'
         }`}>{item.waterReq}</span>
       </div>
-      <div className="flex justify-between">
-        {/* <span className="text-gray-600">Expected Profit:</span> */}
-        <span className="font-medium text-green-600">{item.profit}</span>
-      </div>
     </div>
     <div className="mt-3 pt-3 border-t border-orange-200">
       <p className="text-xs text-gray-600">{t.optimalFor} current climate conditions</p>
@@ -649,7 +823,6 @@ const CropRecommendationCard = React.memo(({ item }) => (
       <InfoRow label="Growth:" value={item.growthPeriod} />
       <InfoRow label="Water:" value={item.waterNeed} />
       <InfoRow label="Market:" value={item.marketDemand} />
-      <InfoRow label="Profit:" value={item.profitability} className="text-green-600" />
     </div>
   </div>
 ));
@@ -857,54 +1030,6 @@ const Card = React.memo(({ title, value, icon }) => (
   </div>
 ));
 
-// Live Feed Card Component
-const LiveFeedCard = React.memo(({ t }) => {
-  const [isOffline, setIsOffline] = useState(false);
-
-  useEffect(() => {
-    const checkCamera = async () => {
-      try {
-        const response = await fetch(CONFIG.CAMERA_URL, { method: 'HEAD', mode: 'no-cors' });
-        setIsOffline(!response.ok);
-      } catch (error) {
-        setIsOffline(true);
-      }
-    };
-
-    checkCamera();
-    const interval = setInterval(checkCamera, 10000); // Check every 10 seconds
-    return () => clearInterval(interval);
-  }, []);
-
-  return (
-    <div className="bg-white rounded-2xl p-4 shadow-md h-full">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="font-semibold flex items-center gap-2">
-          <Camera size={20} className="text-gray-600" />
-          {t.liveFeed}
-        </h2>
-        <div className="text-xs text-gray-500">Live Stream</div>
-      </div>
-      {/* Increased height for the feed portion to make it more prominent */}
-      <div className="relative w-full h-full min-h-[500px]">
-        <iframe
-          src={CONFIG.CAMERA_URL}
-          className="w-full h-full rounded-lg border border-gray-200"
-          title="Live Camera Feed"
-          sandbox="allow-same-origin allow-scripts"
-          onLoad={() => setIsOffline(false)}
-          onError={() => setIsOffline(true)}
-        />
-        {isOffline && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-100 rounded-lg">
-            <p className="text-sm text-gray-500 text-center px-4">{t.cameraOffline}</p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-});
-
 // Custom hook for data fetching with error handling
 const useDataFetching = () => {
   const [rows, setRows] = useState([]);
@@ -986,20 +1111,20 @@ export default function Dashboard() {
 
   // Initialize language preference
   useEffect(() => {
-    const savedLanguage = sessionStorage?.getItem?.('harvii-language');
+    const savedLanguage = typeof window !== 'undefined' ? localStorage.getItem('harvii-language') : null;
     if (savedLanguage && translations[savedLanguage]) {
       setLanguage(savedLanguage);
     } else {
       setLanguage("en");
-      if (typeof sessionStorage !== 'undefined') {
-        sessionStorage.setItem('harvii-language', "en");
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('harvii-language', "en");
       }
     }
   }, []);
 
   useEffect(() => {
-    if (typeof sessionStorage !== 'undefined') {
-      sessionStorage.setItem('harvii-language', language);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('harvii-language', language);
     }
   }, [language]);
 
@@ -1041,6 +1166,9 @@ export default function Dashboard() {
           Soil: Number(r.soil),
           Light: Number(r.light),
           Gas: Number(r.gasPercent),
+          AccelX: Number(r.ax),
+          AccelY: Number(r.ay),
+          AccelZ: Number(r.az),
         });
         lastTime = currentTime;
       }
@@ -1117,7 +1245,7 @@ export default function Dashboard() {
           />
         </main>
         
-        {/* LIVE CAMERA FEED SECTION MOVED HERE AND RESIZED */}
+        {/* LIVE CAMERA FEED SECTION */}
         <section className="mt-8">
           <LiveFeedCard t={t} />
         </section>
@@ -1132,7 +1260,7 @@ export default function Dashboard() {
         />
 
         <footer className="mt-6 text-xs text-gray-500 text-center">
-          HARVII · Dashboard · {new Date().getFullYear()}
+          HARVII Dashboard with Live Camera Integration · {new Date().getFullYear()}
         </footer>
       </div>
     </div>
@@ -1143,10 +1271,6 @@ export default function Dashboard() {
 const DashboardHeader = React.memo(({ t, language, onLanguageChange, onShowPredictions, onRefresh, autoRefresh, onAutoRefreshChange }) => (
   <header className="flex items-center justify-between mb-6">
     <div className="flex items-center gap-4">
-      <div>
-        <h1 className="text-3xl font-extrabold">{t.dashboard}</h1>
-        <p className="text-sm text-gray-600">{t.liveOverview} · Supabase REST</p>
-      </div>
       <button
         onClick={onShowPredictions}
         className="group relative px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg font-medium shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-200 flex items-center gap-2"
@@ -1198,6 +1322,15 @@ const ChartsSection = React.memo(({ chartData, t }) => (
       <SoilMoistureChart data={chartData} t={t} />
       <LightGasChart data={chartData} t={t} />
     </div>
+    
+    {/* Accelerometer Charts */}
+    <div className="bg-white rounded-2xl p-4 shadow-md">
+      <h3 className="font-semibold mb-4">Accelerometer Data (Landslide Detection)</h3>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <AccelerometerChart data={chartData} axis="X" />
+        <AccelerometerChart data={chartData} axis="Y" />
+      </div>
+    </div>
   </section>
 ));
 
@@ -1241,6 +1374,28 @@ const LightGasChart = React.memo(({ data, t }) => (
   </div>
 ));
 
+const AccelerometerChart = React.memo(({ data, axis }) => (
+  <div>
+    <h4 className="font-medium mb-2">Acceleration {axis}-axis</h4>
+    <div style={{ width: "100%", height: 180 }}>
+      <ResponsiveContainer>
+        <LineChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="name" />
+          <YAxis />
+          <Tooltip />
+          <Line 
+            type="monotone" 
+            dataKey={`Accel${axis}`} 
+            stroke={axis === 'X' ? "#FF6B6B" : axis === 'Y' ? "#4ECDC4" : "#45B7D1"} 
+            strokeWidth={2}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  </div>
+));
+
 // Sidebar section component
 const SidebarSection = React.memo(({ t, latest, loading, error, weather, recentAlerts }) => (
   <aside className="space-y-6">
@@ -1270,9 +1425,19 @@ const LatestValuesCard = React.memo(({ t, latest, loading, error }) => (
         <Card title={t.light} value={`${latest.light} %`} icon={<Cloud size={20} />} />
         <Card title={t.gas} value={`${latest.gasPercent} %`} icon={<Wind size={20} />} />
         <Card title={t.alert} value={`${latest.alert}`} icon={<AlertTriangle size={20} />} />
+        {/* Hardware-specific data */}
+        <Card title="Accel X" value={`${latest.ax.toFixed(2)} g`} icon={<Zap size={20} />} />
+        <Card title="Accel Y" value={`${latest.ay.toFixed(2)} g`} icon={<Zap size={20} />} />
+        <Card title="Water Level" value={latest.waterLevel === 1 ? "HIGH" : "LOW"} icon={<Droplet size={20} />} />
+        <Card title="Landslide" value={latest.landslide === 1 ? "DETECTED" : "SAFE"} icon={<AlertTriangle size={20} />} />
         <div className="col-span-2 mt-2 text-xs text-gray-500">
           {t.time}: {new Date(latest.time).toLocaleString()}
         </div>
+        {latest.cameraIP && (
+          <div className="col-span-2 text-xs text-gray-500">
+            Camera: {latest.cameraIP} ({latest.cameraActive ? 'Active' : 'Inactive'})
+          </div>
+        )}
       </div>
     )}
   </div>
@@ -1302,11 +1467,18 @@ const AlertsCard = React.memo(({ t, recentAlerts }) => (
     </div>
     <div className="space-y-2 max-h-48 overflow-auto">
       {recentAlerts.length > 0 ? recentAlerts.map((r) => (
-        <div key={r.id} className="border rounded p-2 bg-red-50">
+        <div key={r.id} className={`border rounded p-2 ${
+          r.alert.includes('Landslide') ? 'bg-red-100 border-red-300' : 'bg-red-50 border-red-200'
+        }`}>
           <div className="text-sm font-medium">{r.alert}</div>
           <div className="text-xs text-gray-600">
             {new Date(r.time).toLocaleString()}
           </div>
+          {r.landslide === 1 && (
+            <div className="text-xs text-red-600 font-medium mt-1">
+              Accelerometer data: X:{r.ax.toFixed(2)}g Y:{r.ay.toFixed(2)}g Z:{r.az.toFixed(2)}g
+            </div>
+          )}
         </div>
       )) : (
         <div className="text-sm text-gray-600">{t.noAlerts}</div>
@@ -1324,7 +1496,7 @@ const ConnectionCard = React.memo(({ t }) => (
     <div className="flex items-center gap-3">
       <Wifi size={20} />
       <div>
-        <div className="text-sm">Supabase REST</div>
+        <div className="text-sm">Supabase REST + ESP32-CAM</div>
         <div className="text-xs text-gray-500">{CONFIG.SUPABASE_URL}</div>
       </div>
     </div>
@@ -1368,18 +1540,36 @@ const RawDataSection = React.memo(({ t, paginationData, rowsPerPage, setRowsPerP
             <th className="p-2">{t.soil}</th>
             <th className="p-2">{t.light}</th>
             <th className="p-2">{t.gas}%</th>
+            <th className="p-2">Accel X</th>
+            <th className="p-2">Accel Y</th>
+            <th className="p-2">Accel Z</th>
+            <th className="p-2">Water</th>
+            <th className="p-2">Landslide</th>
             <th className="p-2">{t.alert}</th>
           </tr>
         </thead>
         <tbody>
           {paginationData.currentData.map((r) => (
-            <tr key={r.id} className="border-b hover:bg-gray-50">
+            <tr key={r.id} className={`border-b hover:bg-gray-50 ${
+              r.landslide === 1 ? 'bg-red-50' : ''
+            }`}>
               <td className="p-2">{new Date(r.time).toLocaleString()}</td>
               <td className="p-2">{r.temp}</td>
               <td className="p-2">{r.hum}</td>
               <td className="p-2">{r.soil}</td>
               <td className="p-2">{r.light}</td>
               <td className="p-2">{r.gasPercent}</td>
+              <td className="p-2">{r.ax.toFixed(2)}</td>
+              <td className="p-2">{r.ay.toFixed(2)}</td>
+              <td className="p-2">{r.az.toFixed(2)}</td>
+              <td className="p-2">{r.waterLevel === 1 ? 'HIGH' : 'LOW'}</td>
+              <td className="p-2">
+                <span className={`px-2 py-1 rounded text-xs font-medium ${
+                  r.landslide === 1 ? 'bg-red-200 text-red-800' : 'bg-green-200 text-green-800'
+                }`}>
+                  {r.landslide === 1 ? 'DETECTED' : 'SAFE'}
+                </span>
+              </td>
               <td className="p-2">{r.alert}</td>
             </tr>
           ))}
